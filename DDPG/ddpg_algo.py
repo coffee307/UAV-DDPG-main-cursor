@@ -16,20 +16,20 @@ tf.disable_v2_behavior()
 import numpy as np
 from UAV_env import UAVEnv
 import time
-import matplotlib.pyplot as plt
+import os
 from state_normalization import StateNormalization
 
 #####################  hyper parameters  ####################
-MAX_EPISODES = 2000
+MAX_EPISODES = 1000
 # MAX_EPISODES = 50000
 
 LR_A = 0.001  # learning rate for actor
 LR_C = 0.002  # learning rate for critic
 # LR_A = 0.1  # learning rate for actor
 # LR_C = 0.2  # learning rate for critic
-GAMMA = 0.001  # optimal reward discount
+GAMMA = 0.9  # optimal reward discount (调整到更合理的值，考虑长期奖励)
 # GAMMA = 0.999  # reward discount
-TAU = 0.01  # soft replacement
+TAU = 0.005  # soft replacement (降低更新频率，使目标网络更稳定)
 VAR_MIN = 0.01
 # MEMORY_CAPACITY = 5000
 MEMORY_CAPACITY = 10000
@@ -66,6 +66,8 @@ class DDPG(object):
         self.memory = np.zeros((MEMORY_CAPACITY, s_dim * 2 + a_dim + 1), dtype=np.float32)  # memory里存放当前和下一个state，动作和奖励
         self.pointer = 0
         self.sess = tf.Session()
+        # 添加模型保存相关的变量
+        self.saver = None
 
         self.a_dim, self.s_dim, self.a_bound = a_dim, s_dim, a_bound,
         self.S = tf.placeholder(tf.float32, [None, s_dim], 's')  # 输入
@@ -99,9 +101,32 @@ class DDPG(object):
         self.atrain = tf.train.AdamOptimizer(LR_A).minimize(a_loss, var_list=self.ae_params)
 
         self.sess.run(tf.global_variables_initializer())
+        
+        # 创建模型保存器
+        self.saver = tf.train.Saver(max_to_keep=1)
 
         if OUTPUT_GRAPH:
             tf.summary.FileWriter("logs/", self.sess.graph)
+    
+    def save_model(self, path='best_model/ddpg_model'):
+        """保存模型"""
+        if self.saver is not None:
+            import os
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            self.saver.save(self.sess, path)
+            print(f"模型已保存到: {path}")
+    
+    def load_model(self, path='best_model/ddpg_model'):
+        """加载模型"""
+        if self.saver is not None:
+            try:
+                self.saver.restore(self.sess, path)
+                print(f"模型已从 {path} 加载")
+                return True
+            except Exception as e:
+                print(f"加载模型失败: {e}")
+                return False
+        return False
 
     def choose_action(self, s):
         temp = self.sess.run(self.a, {self.S: s[np.newaxis, :]})
@@ -161,10 +186,20 @@ ddpg = DDPG(a_dim, s_dim, a_bound)
 
 # var = 1  # control exploration
 var = 0.01  # control exploration
+var_decay = 0.9995  # 探索噪声衰减率（更慢的衰减）
+var_min = 0.005  # 最小探索噪声（保持一定探索）
 t1 = time.time()
 ep_reward_list = []
 ep_total_delay_list = []
 s_normal = StateNormalization()
+
+# 添加最佳性能跟踪
+best_avg_delay = float('inf')
+best_episode = 0
+patience = 50  # 如果连续50个episode性能下降超过20%，则回退到最佳模型
+no_improve_count = 0
+performance_window = 20  # 计算最近20个episode的平均延迟来判断性能
+stability_threshold = 1.15  # 如果当前性能比最佳性能差15%以上，则回退
 
 for i in range(MAX_EPISODES):
     s = env.reset()
@@ -190,7 +225,8 @@ for i in range(MAX_EPISODES):
         ddpg.store_transition(s_normal.state_normal(s), a, r, s_normal.state_normal(s_))  # 训练奖励缩小10倍
 
         if ddpg.pointer > MEMORY_CAPACITY:
-            # var = max([var * 0.9997, VAR_MIN])  # decay the action randomness
+            # 缓慢衰减探索噪声，但保持最小探索
+            var = max([var * var_decay, var_min])
             ddpg.learn()
         s = s_
         ep_reward += r
@@ -201,8 +237,36 @@ for i in range(MAX_EPISODES):
             print('Episode:', i, ' Steps: %2d' % j, ' Reward: %7.2f' % ep_reward, ' total_delay: %7.2f' % total_delay, ' avg_delay: %7.4f' % avg_delay, ' avg_offloading_ratio: %.3f' % avg_offloading_ratio, ' Explore: %.3f' % var)
             ep_reward_list = np.append(ep_reward_list, ep_reward)
             ep_total_delay_list = np.append(ep_total_delay_list, total_delay)
+            
+            # 性能监控和最佳模型保存
+            if len(ep_total_delay_list) >= performance_window:
+                # 计算最近performance_window个episode的平均延迟
+                recent_avg_delay = np.mean(ep_total_delay_list[-performance_window:])
+                
+                # 如果找到更好的性能，保存模型
+                if recent_avg_delay < best_avg_delay:
+                    best_avg_delay = recent_avg_delay
+                    best_episode = i
+                    no_improve_count = 0
+                    # 保存最佳模型
+                    ddpg.save_model('best_model/ddpg_model')
+                    print(f'*** 新的最佳性能! 平均延迟: {best_avg_delay:.2f}, Episode: {i} ***')
+                else:
+                    no_improve_count += 1
+                    # 如果性能持续下降超过阈值，回退到最佳模型
+                    if recent_avg_delay > best_avg_delay * stability_threshold:
+                        if no_improve_count >= patience:
+                            print(f'性能下降超过阈值，回退到Episode {best_episode}的最佳模型 (延迟: {best_avg_delay:.2f})')
+                            ddpg.load_model('best_model/ddpg_model')
+                            # 降低探索噪声，专注于利用
+                            var = var_min
+                            no_improve_count = 0
+                        elif no_improve_count % 10 == 0:
+                            # 每10个episode检查一次，如果性能仍然很差，提前回退
+                            print(f'警告: 性能下降，当前平均延迟: {recent_avg_delay:.2f}, 最佳: {best_avg_delay:.2f}')
+            
             # file_name = 'output_ddpg_' + str(self.bandwidth_nums) + 'MHz.txt'
-            file_name = 'ddpg_f_ue6e8_sun_task_size60/output.txt'
+            file_name = 'output.txt'
             with open(file_name, 'a') as file_obj:
                 file_obj.write("\n======== This episode is done ========")  # 本episode结束
             break
@@ -211,41 +275,37 @@ for i in range(MAX_EPISODES):
     # # Evaluate episode
     # if (i + 1) % 50 == 0:
     #     eval_policy(ddpg, env)
+    
+    # 如果已经找到最佳性能且持续没有改进，可以考虑提前停止
+    # 但这里我们继续训练，只是会回退到最佳模型
 
 print('Running time: ', time.time() - t1)
+print(f'最佳性能: 平均延迟 {best_avg_delay:.2f}, 出现在 Episode {best_episode}')
 
-# 绘制Reward图
-plt.figure(1)
-window = 20
-if len(ep_reward_list) >= window:
-    kernel = np.ones(window) / window
-    smooth_reward = np.convolve(ep_reward_list, kernel, mode='valid')
-    x_smooth = np.arange(window - 1, window - 1 + len(smooth_reward))
-    plt.plot(ep_reward_list, color='lightcoral', linewidth=1, alpha=0.5, label='Raw')
-    plt.plot(x_smooth, smooth_reward, color='crimson', linewidth=2, label='Smoothed (MA-20)')
-    plt.legend()
-else:
-    plt.plot(ep_reward_list, color='crimson', linewidth=2)
-plt.xlabel("Episode")
-plt.ylabel("Reward")
-plt.savefig("history_ddpg/ddpg_reward.png")
-plt.show()
+# 训练结束后，加载最佳模型用于最终评估
+if best_episode > 0:
+    print('加载最佳模型进行最终评估...')
+    ddpg.load_model('best_model/ddpg_model')
 
-# 绘制Total Delay图（与DQN保持一致）
-plt.figure(2)
-window = 20
-if len(ep_total_delay_list) >= window:
-    kernel = np.ones(window) / window
-    smooth_delay = np.convolve(ep_total_delay_list, kernel, mode='valid')
-    x_smooth = np.arange(window - 1, window - 1 + len(smooth_delay))
-    plt.plot(ep_total_delay_list, color='lightsteelblue', linewidth=1, alpha=0.5, label='Raw')
-    plt.plot(x_smooth, smooth_delay, color='steelblue', linewidth=2, label='Smoothed (MA-20)')
-    plt.legend()
-else:
-    plt.plot(ep_total_delay_list, color='steelblue', linewidth=2)
-plt.xlabel("Episode")
-plt.ylabel("Total Delay")
-# 保存total_delay数据供对比使用
-np.save("history_ddpg/ddpg_total_delay.npy", ep_total_delay_list)
-plt.savefig("history_ddpg/ddpg_total_delay.png")
-plt.show()
+# 计算每10个episode的平均总时延（用于后续对比）
+average_delays_per_10 = []  # 存储每10个episode的平均时延
+sub_group_size = 10  # 每10个episode一组
+
+num_sub_groups = len(ep_reward_list) // sub_group_size + (1 if len(ep_reward_list) % sub_group_size else 0)
+
+for sub in range(num_sub_groups):
+    sub_start = sub * sub_group_size
+    sub_end = min(sub_start + sub_group_size, len(ep_reward_list))
+    sub_rewards = ep_reward_list[sub_start:sub_end]
+    if len(sub_rewards) > 0:
+        avg_delay = -np.mean(sub_rewards)  # 奖励是负的延迟
+        average_delays_per_10.append(avg_delay)
+
+# 保存每10个episode的平均总时延数据
+# 使用绝对路径保存到项目根目录，确保无论从哪个目录运行都能找到文件
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)  # 上一级目录（项目根目录）
+output_file = os.path.join(project_root, "ddpg_average_delay_per_10.npy")
+np.save(output_file, np.array(average_delays_per_10))
+print(f"已保存每10个episode的平均总时延数据: {len(average_delays_per_10)} 个数据点")
+print(f"文件保存位置: {output_file}")

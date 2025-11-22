@@ -6,21 +6,19 @@ import numpy as np
 
 class UAVEnv(object):
     height = ground_length = ground_width = 100  # 场地长宽均为100m，UAV飞行高度也是
-    # sum_task_size = 100 * 1048576   # 总计算任务60 Mbits --> 60 80 100 120 140
-    sum_task_size = 60 * 1048576
+    sum_task_size = 60 * 1048576  # 总计算任务60 Mbits
     loc_uav = [50, 50]
     bandwidth_nums = 1
     B = bandwidth_nums * 10 ** 6  # 带宽1MHz
     p_noisy_los = 10 ** (-13)  # 噪声功率-100dBm
     p_noisy_nlos = 10 ** (-11)  # 噪声功率-80dBm
     flight_speed = 50.  # 飞行速度50m/s
-    f_ue = 6e8  # UE的计算频率0.6GHz
-    # f_ue = 2e8  # UE的计算频率0.6GHz
+    f_ue = 3e8  # UE的计算频率0.6GHz
     f_uav = 1.2e9  # UAV的计算频率1.2GHz
     r = 10 ** (-27)  # 芯片结构对cpu处理的影响因子
     s = 1000  # 单位bit处理所需cpu圈数1000
     p_uplink = 0.1  # 上行链路传输功率0.1W
-    alpha0 = 1e-5  # 距离为1m时的参考信道增益-30dB = 0.001， -50dB = 1e-5
+    alpha0 = 0.00001  # 距离为1m时的参考信道增益-50dB = 0.001
     T = 320  # 周期320s
     t_fly = 1
     t_com = 7
@@ -34,8 +32,8 @@ class UAVEnv(object):
     M = 4  # UE数量
     block_flag_list = np.random.randint(0, 2, M)  # 4个ue，ue的遮挡情况
     loc_ue_list = np.random.randint(0, 101, size=[M, 2])  # 位置信息:x在0-100随机
-    task_list = np.random.randint(1572864, 2097153, M)      # 随机计算任务1.5~2Mbits ->对应总任务大小60
-    # task_list = np.random.randint(2097153, 2621440, M)  # 随机计算任务2~2.5Mbits -> 80
+    # task_list = np.random.randint(1048576, 2097153, M)    # 随机计算任务1~2Mbits
+    task_list = np.random.randint(1572864, 2097153, M)  # 随机计算任务1.5~2Mbits
     # ue位置转移概率
     # 0:位置不变; 1:x+1,y; 2:x,y+1; 3:x-1,y; 4:x,y-1
     # loc_ue_trans_pro = np.array([[.6, .1, .1, .1, .1],
@@ -57,7 +55,7 @@ class UAVEnv(object):
         self.state = self.start_state
 
     def reset_env(self):
-        self.sum_task_size = 60 * 1048576  # 总计算任务60 Mbits -> 60 80 100 120 140
+        self.sum_task_size = 100 * 1048576  # 总计算任务60 Mbits -> 60 80 100 120 140
         self.e_battery_uav = 500000  # uav电池电量: 500kJ
         self.loc_uav = [50, 50]
         self.loc_ue_list = np.random.randint(0, 101, size=[self.M, 2])  # 位置信息:x在0-100随机
@@ -164,16 +162,20 @@ class UAVEnv(object):
     # 重置ue任务大小，剩余总任务大小，ue位置，并记录到文件
     def reset2(self, delay, x, y, offloading_ratio, task_size, ue_id):
         self.sum_task_size -= self.task_list[ue_id]  # 剩余任务量
-        for i in range(self.M):  # ue随机移动后的位置
-            tmp = np.random.rand(2)
-            theta_ue = tmp[0] * np.pi * 2  # ue 随机移动角度
-            dis_ue = tmp[1] * self.delta_t * self.v_ue  # ue 随机移动距离
-            self.loc_ue_list[i][0] = self.loc_ue_list[i][0] + math.cos(theta_ue) * dis_ue
-            self.loc_ue_list[i][1] = self.loc_ue_list[i][1] + math.sin(theta_ue) * dis_ue
+        for i in range(self.M):
+            tmp = np.random.rand()
+            if 0.6 < tmp <= .7:
+                self.loc_ue_list[i][0] -= self.delta_t * 4
+            elif 0.7 < tmp <= .8:
+                self.loc_ue_list[i][0] += self.delta_t * 4
+            elif 0.8 < tmp <= .9:
+                self.loc_ue_list[i][1] -= self.delta_t * 4
+            elif 0.9 < tmp <= 1:
+                self.loc_ue_list[i][1] += self.delta_t * 4
             self.loc_ue_list[i] = np.clip(self.loc_ue_list[i], 0, self.ground_width)
         self.reset_step()  # ue随机计算任务1~2Mbits # 4个ue，ue的遮挡情况
         # 记录UE花费
-        file_name = 'ddpg_f_ue6e8_sun_task_size60/output.txt'
+        file_name = 'output.txt'
         # file_name = 'output_ddpg_' + str(self.bandwidth_nums) + 'MHz.txt'
         with open(file_name, 'a') as file_obj:
             file_obj.write("\nUE-" + '{:d}'.format(ue_id) + ", task size: " + '{:d}'.format(int(task_size)) + ", offloading ratio:" + '{:.2f}'.format(offloading_ratio))

@@ -13,8 +13,7 @@ class UAVEnv(object):
     p_noisy_los = 10 ** (-13)  # 噪声功率-100dBm
     p_noisy_nlos = 10 ** (-11)  # 噪声功率-80dBm
     flight_speed = 50.  # 飞行速度50m/s
-    f_ue = 6e8
-    # f_ue = 3e8  # UE的计算频率0.6GHz
+    f_ue = 3e8  # UE的计算频率0.6GHz
     f_uav = 1.2e9  # UAV的计算频率1.2GHz
     r = 10 ** (-27)  # 芯片结构对cpu处理的影响因子
     s = 1000  # 单位bit处理所需cpu圈数1000
@@ -68,19 +67,23 @@ class UAVEnv(object):
         return self._get_obs()
 
     def reset_env(self):
-        self.sum_task_size = 60 * 1048576
-        # self.sum_task_size = 100 * 1048576  # 总计算任务60 Mbits -> 60 80 100 120 140
+        self.sum_task_size = 100 * 1048576  # 总计算任务60 Mbits -> 60 80 100 120 140
         self.e_battery_uav = 500000  # uav电池电量: 500kJ
         self.loc_uav = [50, 50]
         self.loc_ue_list = np.random.randint(0, 101, size=[self.M, 2])  # 位置信息:x在0-100随机
         self.reset_step()
 
     def reset_step(self):
-        self.task_list = np.random.randint(1572864, 2097153, self.M)  # 随机计算任务1.5~2Mbits
-        # self.task_list = np.random.randint(2621440, 3145729,self.M)  # 随机计算任务1.5~2Mbits -> 1.5~2 2~2.5 2.5~3 3~3.5 3.5~4
+        # self.task_list = np.random.randint(1572864, 2097153, self.M)  # 随机计算任务1.5~2Mbits -> 1.5~2 2~2.5 2.5~3 3~3.5 3.5~4
+        # self.task_list = np.random.randint(2097152, 2621441, self.M)  # 随机计算任务1.5~2Mbits -> 1.5~2 2~2.5 2.5~3 3~3.5 3.5~4
+        self.task_list = np.random.randint(2621440, 3145729,
+                                           self.M)  # 随机计算任务1.5~2Mbits -> 1.5~2 2~2.5 2.5~3 3~3.5 3.5~4
+        # self.task_list = np.random.randint(3145728, 3670017, self.M)  # 随机计算任务1.5~2Mbits -> 1.5~2 2~2.5 2.5~3 3~3.5 3.5~4
+        # self.task_list = np.random.randint(3670016, 4194305, self.M)  # 随机计算任务1.5~2Mbits -> 1.5~2 2~2.5 2.5~3 3~3.5 3.5~4
         self.block_flag_list = np.random.randint(0, 2, self.M)  # 4个ue，ue的遮挡情况
 
     def _get_obs(self):
+        # uav battery remain, uav loc, remaining sum task size, all ue loc, all ue task size, all ue block_flag
         self.state = np.append(self.e_battery_uav, self.loc_uav)
         self.state = np.append(self.state, self.sum_task_size)
         self.state = np.append(self.state, np.ravel(self.loc_ue_list))
@@ -172,8 +175,7 @@ class UAVEnv(object):
         #     self.loc_ue_list[i] = np.clip(self.loc_ue_list[i], 0, self.ground_width)
         self.reset_step()  # ue随机计算任务1~2Mbits # 4个ue，ue的遮挡情况
         # 记录UE花费
-        # file_name = 'output.txt'
-        file_name = 'output_gpt.txt'
+        file_name = 'output.txt'
         # file_name = 'output_ddpg_' + str(self.bandwidth_nums) + 'MHz.txt'
         with open(file_name, 'a') as file_obj:
             file_obj.write("\nUE-" + '{:d}'.format(ue_id) + ", task size: " + '{:d}'.format(
